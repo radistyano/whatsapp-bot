@@ -1,3 +1,21 @@
+# Dependencies
+node_modules/
+package-lock.json
 
-.codegpt
-node_modules
+# Environment
+.env
+
+# WhatsApp auth files
+whatsapp-auth/
+auth_info_baileys/
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Temporary files
+*.log
+temp/
+temp_*
+
+# IDE
+.vscode/
+.idea/

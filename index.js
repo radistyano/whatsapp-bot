@@ -1,65 +1,143 @@
+require('dotenv').config();
+const TelegramBot = require('node-telegram-bot-api');
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
-const Logger = require('./utils/logger');
+const qrcode = require('qrcode'); // Ubah ini dari qr-image menjadi qrcode
+const fs = require('fs');
+const express = require('express');
+const ngrok = require('ngrok');
+const { handleTelegramCommands } = require('./src/handlers/telegram');
+const { setupWhatsAppClient } = require('./src/handlers/whatsapp');
 
-// Inisialisasi client
-const client = new Client({
-    authStrategy: new LocalAuth(),
+// Express setup
+const app = express();
+const port = process.env.PORT || 3000;
+
+// Setup ngrok dengan tambahan error handling dan konfigurasi
+const setupNgrok = async () => {
+    try {
+        // Kill existing ngrok sessions
+        await ngrok.kill();
+
+        // Configure ngrok
+        await ngrok.authtoken('2rNd82tBuXpidvy7PcBvQJto8Z8_3vZ5pMTt8QKSec1pxuLgR');
+
+        // Start tunnel with detailed configuration
+        const url = await ngrok.connect({
+            proto: 'http',
+            addr: port,
+            region: 'us',
+            authtoken: '2rNd82tBuXpidvy7PcBvQJto8Z8_3vZ5pMTt8QKSec1pxuLgR'
+        });
+
+        console.log('Ngrok tunnel created:', url);
+        return url;
+    } catch (error) {
+        console.error('Ngrok setup error:', error);
+        return null;
+    }
+};
+
+// WhatsApp client configuration
+const whatsapp = new Client({
+    authStrategy: new LocalAuth({
+        clientId: 'telegram-bot',
+        dataPath: './whatsapp-auth'
+    }),
     puppeteer: {
-        headless: true,
-        args: ['--no-sandbox']
+        headless: 'new',
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-web-security',
+            '--disable-extensions',
+            '--disable-software-rasterizer',
+            '--disable-dev-tools'
+        ],
+        defaultViewport: {
+            width: 1280,
+            height: 720
+        }
     }
 });
 
-// Event ketika QR code perlu di scan
-client.on('qr', (qr) => {
-    qrcode.generate(qr, { small: true });
-    Logger.info('QR Code telah digenerate, silakan scan menggunakan WhatsApp');
-});
+// Setup directories
+const setupDirectories = () => {
+    const dirs = ['./whatsapp-auth', './temp'];
+    dirs.forEach(dir => {
+        if (fs.existsSync(dir)) {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+        fs.mkdirSync(dir, { recursive: true });
+    });
+};
 
-// Event untuk status koneksi
-client.on('loading_screen', (percent, message) => {
-    Logger.info(`Loading ${percent}% - ${message}`);
-});
-
-client.on('authenticated', () => {
-    Logger.info('WhatsApp berhasil diautentikasi!');
-});
-
-client.on('auth_failure', msg => {
-    Logger.error('Autentikasi gagal!', msg);
-});
-
-// Event ketika client sudah siap
-client.on('ready', () => {
-    Logger.info('WhatsApp Bot sudah siap dan terhubung!');
-    Logger.info('----------------------------------------');
-    Logger.info('Silakan kirim !ping untuk test bot');
-});
-
-// Event ketika client terputus
-client.on('disconnected', (reason) => {
-    Logger.warning('WhatsApp terputus! Alasan:', reason);
-});
-
-// Event ketika pesan masuk
-client.on('message', async msg => {
+// Initialize application
+const init = async () => {
     try {
-        const content = msg.body.toLowerCase();
+        setupDirectories();
+        
+        app.use(express.json());
+        
+        const ngrokUrl = await setupNgrok();
+        
+        const bot = ngrokUrl ? 
+            new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
+                webHook: { port }
+            }) :
+            new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 
-        // Command handler sederhana
-        if (content === '!ping') {
-            msg.reply('pong');
-            Logger.info(`Responded to ping command from ${msg.from}`);
+        if (ngrokUrl) {
+            await bot.setWebHook(`${ngrokUrl}/webhook`);
+            console.log('Webhook set to:', `${ngrokUrl}/webhook`);
+
+            app.post('/webhook', (req, res) => {
+                bot.handleUpdate(req.body);
+                res.sendStatus(200);
+            });
+        } else {
+            console.log('Running in polling mode');
         }
 
-        // Tambahkan command lain di sini
+        app.get('/', (req, res) => {
+            res.json({
+                status: 'active',
+                mode: ngrokUrl ? 'webhook' : 'polling',
+                timestamp: new Date().toISOString()
+            });
+        });
+        
+        app.listen(port, () => {
+            console.log(`Server running on port ${port}`);
+        });
+
+        handleTelegramCommands(bot, whatsapp);
+        setupWhatsAppClient(whatsapp, bot);
+
+        await whatsapp.initialize();
+
+        console.log('Bot initialization complete!');
 
     } catch (error) {
-        Logger.error(`Error handling message: ${error.message}`);
+        console.error('Initialization error:', error);
+        process.exit(1);
     }
+};
+
+// Error handling
+process.on('unhandledRejection', (error) => {
+    console.error('Unhandled rejection:', error);
 });
 
-// Inisialisasi client
-console.log('Menginisialisasi WhatsApp Bot...');
-client.initialize();
+process.on('SIGINT', async () => {
+    console.log('Shutting down...');
+    await ngrok.kill();
+    process.exit(0);
+});
+
+// Start application
+init().catch(error => {
+    console.error('Failed to start application:', error);
+    process.exit(1);
+});
